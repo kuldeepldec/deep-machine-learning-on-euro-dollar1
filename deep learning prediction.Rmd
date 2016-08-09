@@ -1,0 +1,183 @@
+---
+title: "deep learning for euro dollar prediction"
+author: "kuldeep singh bhati"
+output: html_document
+---
+The aim of the project is to train deep neural network using DN SAE model and predict next bar up and down for euro/dollar. 
+Input data for the project use
+https://github.com/kuldeepldec/deep-machine-learning-on-euro-dollar1
+
+
+
+## Libraries required for the project
+```{r}
+library(caret)
+library(deepnet)
+library(quantmod)
+library(rminer)
+library(TTR)
+```
+
+###first read table euro/dollar 78 minute data data.
+```{r}
+price<-read.table("euro1.txt",header=TRUE,sep=",")
+price1<-price
+price=subset(price[,3:6])
+
+
+```
+###Calculating median and range for the bar
+```{r}
+Med <- (price[,2] + price[,3])/2
+CO <- price[, 4] - price[, 1]
+HL<-(price[,2] - price[,3])
+```
+###Add Med and CO prices to the matrix
+```{r}
+price <- cbind(price, Med, CO)
+```
+##Now producing indicators for input data,making an Input function
+
+```{r}
+Input<-function(p = 16){
+  adx<-ADX(price, n = p)
+  ar<-aroon(price[ ,c('High', 'Low')], n=p)[ ,'oscillator']
+  cci<-CCI(price[ ,2:4], n = p)
+  chv<-chaikinVolatility(price[ ,2:4], n = p)
+  cmo<-CMO(price[ ,'Med'], n = p)
+  macd<-MACD(price[ ,'Med'], 12, 26, 9)[ ,'macd']
+  osma<-macd - MACD(price[ ,'Med'],12, 26, 9)[ ,'signal']
+  rsi<-RSI(price[ ,'Med'], n = p)
+  stoh<-stoch(price[ ,2:4],14, 3, 3)
+  vol<-volatility(price[ ,1:4],n = p,calc="yang.zhang", N=96)
+  xavg<-EMA(price[,4],n=p)
+  trend<-price[,4]-xavg;
+  atr5<-ATR(HLC(price),5)
+  atr5<-atr5[,2]
+  
+  Input<-cbind(adx, ar, cci, chv, cmo, macd, osma, rsi, stoh,vol,xavg,trend,atr5)
+#  Input<-cbind(adx, ar, cci, chv, cmo, macd, osma, rsi, stoh,vol)
+  return(Input)
+}
+```
+
+
+
+###to access In Function
+```{r}
+X<-Input()
+```
+
+
+##Making an out function for buy and sell signal, out signal take median price and calculate difference between two median prices.if value is postive assign 0 and if value is negative assign 0
+
+```{r}
+Out<-function(ch=0.0037){
+  
+  zz<-ZigZag(price[ ,'Med'], change = ch, percent = F, retrace = F, lastExtreme = T)
+  n<-1:length(zz)
+  
+  # On the last bars substitute the undefined values for the last known ones
+  for(i in n) { if(is.na(zz[i])) zz[i] = zz[i-1]}
+  #Define the speed of ZigZag changes and move one bar forward
+  dz<-c(diff(zz), NA)
+  #If the speed >0 - signal = 0(Buy), if <0, signal = 1 (Sell) otherwise NA
+  sig<-ifelse(dz>0, 0, ifelse(dz<0, 1, NA))
+  return(sig)
+}
+```
+
+```{r}
+Y<-Out()
+table(Y)
+```
+##clearing Na values using clearing function
+```{r}
+Clearing<-function(x, y){
+  dt<-cbind(x,y);
+  n<-ncol(dt)
+  dt<-na.omit(dt)
+  return(dt);  
+}
+```
+
+```{r}
+dt<-Clearing(X,Y)
+```
+##Balancing function check if 1 and 0 signal are equal or not, if they are not equal it insert 0 to columns of y with 1.
+```{r}
+Balancing<-function(DT){
+  #Calculate a table with a number of classes
+  cl<-table(DT[ ,ncol(DT)]);
+  #If the divergence is less than 15%, return the initial matrix
+  if(max(cl)/min(cl)<= 1.15) return(DT)
+  #Otherwise level by the greater side
+  DT<-if(max(cl)/min(cl)> 1.15){ 
+         upSample(x = DT[ ,-ncol(DT)],y = as.factor(DT[ , ncol(DT)]), yname = "Y")
+        }
+  #Convert ? (factor) into a number
+  DT$Y<-as.numeric(DT$Y)
+  #Recode ? from 1,2 into 0,1
+  DT$Y<-ifelse(DT$Y == 1, 0, 1)
+  #Convert dataframe to matrix
+  DT<-as.matrix(DT)
+  return(DT);
+}
+```
+###Seperating value of x and Y
+```{r}
+dt.b<-Balancing(dt)
+```
+
+```{r}
+set.seed<-1245
+X<-dt.b[ ,-ncol(dt.b)]
+Y<-dt.b[ ,ncol(dt.b)]
+t<-holdout(Y, ratio = 8/10, mode = "order")
+prepr<-preProcess(X[t$tr, ], method = "spatialSign")
+x.tr<-predict(prepr, X[t$tr, ])
+y.tr<- Y[t$tr]; 
+SAE<-sae.dnn.train(x = x.tr , y = y.tr , hidden = c(50, 50, 50), 
+                     activationfun = "tanh",
+                     learningrate = 0.7, momentum = 0.5, 
+                     output = "sigm", sae_output = "linear", 
+                     numepochs = 10, batchsize = 50)
+X<-dt[ ,-ncol(dt)]
+Y<-dt[ ,ncol(dt)]
+x.ts<-predict(prepr, tail(X, 501))
+y.ts<-tail(Y, 501)
+pr.sae<-nn.predict(SAE, x.ts)
+
+  #Variant +/- mean
+sig<-ifelse(pr.sae>mean(pr.sae), -1, 1)
+  #Variant 60/40#
+#sig<-ifelse(pr.sae>0.6, -1, ifelse(pr.sae<0.4, 1, 0))
+#sig.zz<-ifelse(y.ts == 0, 1,-1 )
+
+comm<-tail(HL, 501)*100000*.01
+
+bal1<-(tail(price[ ,'CO'], 501) * sig*100000)-comm
+
+
+
+bal<-cumsum(bal1)+100000
+
+plot(bal,  t = "l")
+
+
+
+
+
+write.csv(tail(price1[ ,1], 501),'bal1.csv')
+
+de<-cbind(tail(price[  ,1], 501),tail(price[  ,4], 501),sig,bal1,bal)
+
+write.csv(de,'bal.csv')
+
+
+#bal.zz<-cumsum(tail(price[  ,'CO'], 1) * sig.zz)
+```
+
+
+
+
